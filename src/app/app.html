@@ -1,0 +1,15 @@
+@switch (status()) {
+  @case ('complete') {
+    <p>SDK successfully initialized!</p>
+  }
+  @case ('failed') {
+    <p>
+      SDK failed to initialize. Please check your internet connection and SDK credential for any
+      typo.
+    </p>
+  }
+  @default {
+    <p>Initializing&hellip;</p>
+  }
+}
+<p>The {{ flagKey }} feature flag evaluates to {{ flagValue() }}.</p>
