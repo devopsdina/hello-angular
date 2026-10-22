@@ -24,7 +24,7 @@ npm start
 
 3. Open [http://localhost:4200](http://localhost:4200).
 
-You should receive the message "The <flagKey> feature flag evaluates to <flagValue>." The application will run continuously and react to the flag changes in LaunchDarkly.
+You should receive the message "The <flagKey> feature flag evaluates to <flagValue>." The application will run continuously and react to the flag changes in LaunchDarkly. Below it, the page shows the evaluation reason and a few of the directives using the same flag.
 
 To run the unit tests, which use a mock client and never call LaunchDarkly:
 
@@ -37,6 +37,7 @@ npm test
 | File | What it does |
 | --- | --- |
 | [`launchdarkly.service.ts`](src/app/launchdarkly/launchdarkly.service.ts) | The service, plus `provideLaunchDarkly()` to register it. This is the part to copy into your app. |
+| [`directives/`](src/app/launchdarkly/directives) | Optional template directives (`*ldIf`, `[ldTrack]`, and others). Copy them too if you want them. |
 | [`testing/mock-launchdarkly-client.ts`](src/app/launchdarkly/testing/mock-launchdarkly-client.ts) | An in-memory client for unit tests. |
 | [`app.config.ts`](src/app/app.config.ts) | Registers the service with your client-side ID and evaluation context. |
 | [`app.ts`](src/app/app.ts) | The demo component that reads the flag. |
@@ -70,7 +71,72 @@ or as an observable:
 this.ld.stringVariation$('theme', 'light').subscribe((theme) => applyTheme(theme));
 ```
 
-String, number, and JSON flags work the same way (`stringVariation`, `numberVariation`, `jsonVariation`). Use `identify()` to switch context, for example after login, and `track()` to send custom events. `ldClient` gives you the underlying SDK client for anything else.
+String, number, and JSON flags work the same way (`stringVariation`, `numberVariation`, `jsonVariation`). `variation` is untyped and returns whatever the flag serves.
+
+#### Service reference
+
+Every flag method has a signal version and an observable version ending in `$`. Call the signal versions in a field initializer or constructor.
+
+| Method | Returns |
+| --- | --- |
+| `boolVariation`, `stringVariation`, `numberVariation`, `jsonVariation`, `variation` | The flag value |
+| `boolVariationDetail`, `stringVariationDetail`, `numberVariationDetail`, `jsonVariationDetail`, `variationDetail` | The value plus the reason for it, for example a targeting rule match, the default rule, or `FLAG_NOT_FOUND` |
+| `status` / `status$` | `'initializing'`, `'complete'`, `'timeout'`, or `'failed'` |
+| `ready` / `ready$` | `true` once flags have loaded |
+| `waitUntilReady$(timeoutMs)` | Emits `false` if flags haven't loaded by the timeout, then `true` once they do. It never errors, so it's safe in route guards and resolvers |
+| `context` / `context$` | The current evaluation context |
+| `flagChanges$` | The keys of flags that just changed |
+| `identify(context)` | Switches context, for example after login. Flags re-evaluate and update |
+| `track(key, data?, metricValue?)` | Sends a custom event for metrics and experiments |
+| `flush()` | Sends pending analytics events now |
+| `ldClient` | The underlying SDK client, for anything else |
+
+Evaluation reasons are only included when you set `withReasons: true` in `options`, as this demo does. Without it, `reason` is empty.
+
+#### Directives
+
+The directives are optional. They let you use flags directly in templates. Import them all with `LD_DIRECTIVES`, or import only the ones you need:
+
+```ts
+@Component({ imports: [LD_DIRECTIVES], ... })
+```
+
+| Directive | What it does |
+| --- | --- |
+| `*ldIf` | Renders content when a flag is on, or equals `value`. Supports `else`. |
+| `*ldFlag` | Renders content with the flag's value available as a template variable. |
+| `[ldClassIf]` | Adds CSS classes when a flag is on, and optional other classes when it's off. |
+| `[ldStyleIf]` | Sets inline styles when a flag is on. Keys can include a unit, like `'fontSize.px'`. |
+| `[ldSwitch]`, `*ldSwitchCase`, `*ldSwitchDefault` | Shows the case that matches a multivariate flag's value. |
+| `[ldTrack]` | Sends a custom event on click, or on another DOM event with `ldTrackEvent`. |
+
+```html
+<!-- Show or hide content -->
+<new-checkout *ldIf="'new-checkout'; else oldCheckout" />
+<ng-template #oldCheckout><old-checkout /></ng-template>
+
+<!-- Match a specific value -->
+<p *ldIf="'theme'; value: 'dark'">Dark mode is on</p>
+
+<!-- Use the flag's value in the template -->
+<p *ldFlag="'banner-text'; fallback: 'Welcome'; let text">{{ text }}</p>
+
+<!-- Classes and styles -->
+<button [ldClassIf]="'new-styles'" ldClassIfClass="btn-new" ldClassIfElseClass="btn-old">Buy</button>
+<h1 [ldStyleIf]="'big-title'" [ldStyleIfStyle]="{ 'fontSize.px': 48 }">Hello</h1>
+
+<!-- Multivariate flags -->
+<div [ldSwitch]="'checkout-layout'">
+  <one-page *ldSwitchCase="'one-page'" />
+  <multi-step *ldSwitchCase="'multi-step'" />
+  <classic *ldSwitchDefault />
+</div>
+
+<!-- Custom events -->
+<button ldTrack="purchase" [ldTrackData]="{ plan: 'pro' }" [ldTrackValue]="49">Buy</button>
+```
+
+Each directive only updates the DOM when its flag's value changes, and cleans up when it's destroyed. The selectors and inputs match the [unofficial Angular SDK](https://github.com/launchdarkly-labs/launchdarkly-angular-sdk-unofficial), so most templates written for it carry over. One difference: `ldTrack` sends your `ldTrackData` as is, without adding details about the element.
 
 #### Things the service handles for you
 
@@ -102,4 +168,4 @@ TestBed.configureTestingModule({ imports: [MyComponent], providers: [provideMock
 client.setFlags({ 'show-banner': true }); // fires a change event, just like LaunchDarkly would
 ```
 
-See [`app.spec.ts`](src/app/app.spec.ts) and [`launchdarkly.service.spec.ts`](src/app/launchdarkly/launchdarkly.service.spec.ts) for full examples.
+See [`app.spec.ts`](src/app/app.spec.ts), [`launchdarkly.service.spec.ts`](src/app/launchdarkly/launchdarkly.service.spec.ts), and [`directives.spec.ts`](src/app/launchdarkly/directives/directives.spec.ts) for full examples.

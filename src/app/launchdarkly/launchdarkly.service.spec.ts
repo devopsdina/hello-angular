@@ -61,6 +61,50 @@ describe('LaunchDarklyService', () => {
     warn.mockRestore();
   });
 
+  it('returns evaluation details that update', () => {
+    const detail = TestBed.runInInjectionContext(() =>
+      service.boolVariationDetail('my-flag', false),
+    );
+    expect(detail()).toEqual({ value: true, variationIndex: 0, reason: { kind: 'FALLTHROUGH' } });
+    client.setFlags({ 'my-flag': false });
+    expect(detail().value).toBe(false);
+
+    const missing = TestBed.runInInjectionContext(() => service.variationDetail('missing', 'x'));
+    expect(missing().reason).toEqual({ kind: 'ERROR', errorKind: 'FLAG_NOT_FOUND' });
+  });
+
+  it('waitUntilReady$ emits false on timeout, then true once flags load', async () => {
+    vi.useFakeTimers();
+    const values: boolean[] = [];
+    service.waitUntilReady$(100).subscribe((v) => values.push(v));
+    vi.advanceTimersByTime(100);
+    expect(values).toEqual([false]);
+    await service.start();
+    expect(values).toEqual([false, true]);
+    vi.useRealTimers();
+  });
+
+  it('waitUntilReady$ emits only true when flags are already loaded', async () => {
+    await service.start();
+    const values: boolean[] = [];
+    service.waitUntilReady$(100).subscribe((v) => values.push(v));
+    expect(values).toEqual([true]);
+    expect(service.ready()).toBe(true);
+  });
+
+  it('emits changed flag keys on flagChanges$', () => {
+    const changes: string[][] = [];
+    service.flagChanges$.subscribe((keys) => changes.push(keys));
+    client.setFlags({ 'my-flag': false, 'my-string': 'green' });
+    expect(changes).toEqual([['my-flag', 'my-string']]);
+  });
+
+  it('updates context after identify()', async () => {
+    const context = { kind: 'user', key: 'user-2', name: 'Alex' };
+    await service.identify(context);
+    expect(service.context()).toEqual(context);
+  });
+
   it('passes track() through to the client', () => {
     service.track('button-clicked', { page: 'home' }, 1);
     expect(client.trackedEvents).toEqual([

@@ -15,6 +15,8 @@ export const appConfig: ApplicationConfig = {
         key: 'example-user-key',
         name: 'Sandy',
       },
+      // Include evaluation reasons, so the page can show why the flag has the value it does.
+      options: { withReasons: true },
     }),
   ],
 };

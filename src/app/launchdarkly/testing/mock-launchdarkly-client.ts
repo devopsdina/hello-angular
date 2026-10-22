@@ -46,6 +46,31 @@ export class MockLaunchDarklyClient {
   jsonVariation = (key: string, fallback: unknown) => this.variation(key, fallback);
   allFlags = () => ({ ...this.flags });
 
+  variationDetail = (key: string, fallback?: unknown) =>
+    this.detail(key, this.variation(key, fallback));
+  boolVariationDetail = (key: string, fallback: boolean) =>
+    this.detail(key, this.boolVariation(key, fallback));
+  stringVariationDetail = (key: string, fallback: string) =>
+    this.detail(key, this.stringVariation(key, fallback));
+  numberVariationDetail = (key: string, fallback: number) =>
+    this.detail(key, this.numberVariation(key, fallback));
+  jsonVariationDetail = (key: string, fallback: unknown) =>
+    this.detail(key, this.jsonVariation(key, fallback));
+
+  flush = async () => ({ result: true });
+  getContext = () => this.context;
+
+  // Reports FALLTHROUGH for known flags, and FLAG_NOT_FOUND for missing ones, like the real SDK.
+  private detail<T>(key: string, value: T) {
+    return key in this.flags
+      ? { value, variationIndex: 0, reason: { kind: 'FALLTHROUGH' as const } }
+      : {
+          value,
+          variationIndex: null,
+          reason: { kind: 'ERROR' as const, errorKind: 'FLAG_NOT_FOUND' as const },
+        };
+  }
+
   // Like the real SDK, a typed variation returns the fallback when the value is the wrong type.
   private typed<T>(key: string, fallback: T, type: string): T {
     const value = this.flags[key];

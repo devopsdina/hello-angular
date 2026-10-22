@@ -13,3 +13,12 @@
   }
 }
 <p>The {{ flagKey }} feature flag evaluates to {{ flagValue() }}.</p>
+<p class="detail">Reason: {{ reason() }}</p>
+
+<section>
+  <h2>Directive examples</h2>
+  <p *ldIf="flagKey; else flagOff">*ldIf: the flag is on.</p>
+  <ng-template #flagOff><p>*ldIf: the flag is off.</p></ng-template>
+  <p [ldClassIf]="flagKey" ldClassIfClass="pill on" ldClassIfElseClass="pill off">[ldClassIf]</p>
+  <button ldTrack="hello-angular-button-clicked">[ldTrack]: send a custom event</button>
+</section>
