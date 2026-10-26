@@ -10,15 +10,13 @@ import {
   provideAppInitializer,
 } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
-import {
-  createClient,
-  type LDClient,
-  type LDContext,
-  type LDEvaluationDetail,
-  type LDEvaluationDetailTyped,
-  type LDFlagValue,
-  type LDIdentifyResult,
-  type LDOptions,
+import type {
+  LDClient,
+  LDContext,
+  LDEvaluationDetail,
+  LDEvaluationDetailTyped,
+  LDFlagValue,
+  LDIdentifyResult,
 } from '@launchdarkly/js-client-sdk';
 import {
   BehaviorSubject,
@@ -34,35 +32,38 @@ import {
   timer,
 } from 'rxjs';
 
-export interface LaunchDarklyConfig {
-  /** Your LaunchDarkly client-side ID. */
-  clientSideID: string;
-  /** The evaluation context to start with. Call `identify()` to change it later, for example on login. */
-  context: LDContext;
-  /** Any JavaScript SDK options. They are passed straight through to `createClient()`. */
-  options?: LDOptions;
-  /**
-   * How long app startup waits for flags, in seconds. If the SDK is not ready in time, the app
-   * renders with fallback values and updates once flags arrive. Defaults to 5.
-   */
-  timeout?: number;
-}
+import { launchDarklyStatus, waitForFlags } from './flag-signal';
+import {
+  IDENTIFY_TIMEOUT_SECONDS,
+  LaunchDarklyClientConfig,
+  LaunchDarklyStatus,
+  closeLaunchDarkly,
+  getLaunchDarkly,
+  initLaunchDarkly,
+} from './ld-client';
+
+export type { LaunchDarklyStatus } from './ld-client';
+
+// The service is an optional layer over ld-client.ts, which owns the client, the singleton and the
+// 500ms timeouts. Use the service if you want observables, evaluation details, the template
+// directives, or a client you can swap for a mock through dependency injection.
+
+export type LaunchDarklyConfig = Pick<
+  LaunchDarklyClientConfig,
+  'clientSideID' | 'context' | 'options'
+>;
 
 export const LAUNCHDARKLY_CONFIG = new InjectionToken<LaunchDarklyConfig>('LAUNCHDARKLY_CONFIG');
 
 /**
- * The LaunchDarkly client instance. Override this token in tests to supply a mock client
- * (see `testing/mock-launchdarkly-client.ts`).
+ * The LaunchDarkly client instance: the one ld-client.ts already created, if any (for example by
+ * provideLaunchDarklyClient()), or a new one from LAUNCHDARKLY_CONFIG. Override this token in tests
+ * to supply a mock client (see `testing/mock-launchdarkly-client.ts`).
  */
 export const LAUNCHDARKLY_CLIENT = new InjectionToken<LDClient>('LAUNCHDARKLY_CLIENT', {
   providedIn: 'root',
-  factory: () => {
-    const { clientSideID, context, options } = inject(LAUNCHDARKLY_CONFIG);
-    return createClient(clientSideID, context, { streaming: true, ...options });
-  },
+  factory: () => getLaunchDarkly() ?? initLaunchDarkly(inject(LAUNCHDARKLY_CONFIG)).client,
 });
-
-export type LaunchDarklyStatus = 'initializing' | 'complete' | 'timeout' | 'failed';
 
 /**
  * Registers the LaunchDarkly service and starts the SDK during app startup.
@@ -129,32 +130,20 @@ export class LaunchDarklyService implements OnDestroy {
   );
 
   constructor() {
-    // SDK callbacks run outside Angular. Re-entering the zone keeps change detection working in
-    // zone-based apps; in zoneless apps (the Angular 21 default) this is a harmless no-op.
+    // Re-entering the zone makes sure change detection runs in zone-based apps, even if an SDK
+    // callback fires outside it. In zoneless apps (the Angular 21 default) this is a no-op.
     this.client.on('change', (_context: LDContext, changedKeys: string[]) => {
       this.zone.run(() => this.changes$.next(changedKeys));
     });
+    // If provideLaunchDarklyClient() already started this client, pick up its startup result.
+    if (this.client === getLaunchDarkly() && launchDarklyStatus() !== 'initializing') {
+      this.statusSubject$.next(launchDarklyStatus());
+    }
   }
 
-  /** Starts the SDK and waits for flags. Resolves with the result status and never rejects. */
-  async start(): Promise<LaunchDarklyStatus> {
-    const timeout = this.config?.timeout ?? 5;
-    const result = await this.client.start({ timeout });
-    this.setStatus(result.status);
-    if (result.status === 'timeout') {
-      console.warn(
-        `[LaunchDarkly] Flags didn't load within ${timeout}s, so the app is showing fallback values. ` +
-          'The SDK keeps trying in the background and will update flags when it connects.',
-      );
-      this.client.waitForInitialization().then((later) => this.setStatus(later.status));
-    } else if (result.status === 'failed') {
-      console.error(
-        '[LaunchDarkly] The SDK failed to initialize, so the app is showing fallback values. ' +
-          'Check that your client-side ID is correct.',
-        result.error,
-      );
-    }
-    return result.status;
+  /** Waits for flags, at most 500ms. Resolves with the result status and never rejects. */
+  start(): Promise<LaunchDarklyStatus> {
+    return waitForFlags(this.client, (status) => this.setStatus(status));
   }
 
   /**
@@ -276,9 +265,12 @@ export class LaunchDarklyService implements OnDestroy {
 
   // --- Context and events ----------------------------------------------------------------------
 
-  /** Switches to a new evaluation context, for example after login. Flags re-evaluate and update. */
+  /**
+   * Switches to a new evaluation context, for example after login. Waits at most 500ms; on timeout
+   * the SDK keeps going in the background and flags update when it finishes.
+   */
   async identify(context: LDContext): Promise<LDIdentifyResult> {
-    const result = await this.client.identify(context);
+    const result = await this.client.identify(context, { timeout: IDENTIFY_TIMEOUT_SECONDS });
     if (result.status === 'completed') {
       this.zone.run(() => this.contextSubject$.next(context));
     } else {
@@ -304,7 +296,11 @@ export class LaunchDarklyService implements OnDestroy {
 
   ngOnDestroy(): void {
     // Flushes pending analytics events and closes the streaming connection.
-    this.client.close();
+    if (getLaunchDarkly() === this.client) {
+      closeLaunchDarkly();
+    } else {
+      this.client.close();
+    }
   }
 
   private setStatus(status: LaunchDarklyStatus): void {

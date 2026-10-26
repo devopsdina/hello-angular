@@ -2,6 +2,7 @@ import { Component, computed, inject } from '@angular/core';
 
 import { flagKey } from '../environments/environment';
 import { LD_DIRECTIVES } from './launchdarkly/directives';
+import { flagSignal, launchDarklyStatus } from './launchdarkly/flag-signal';
 import { LaunchDarklyService } from './launchdarkly/launchdarkly.service';
 
 @Component({
@@ -12,14 +13,16 @@ import { LaunchDarklyService } from './launchdarkly/launchdarkly.service';
   host: { '[style.background-color]': 'background()' },
 })
 export class App {
-  private readonly ld = inject(LaunchDarklyService);
-
   protected readonly flagKey = flagKey;
-  protected readonly status = this.ld.status;
-  // A signal that updates whenever the flag changes in LaunchDarkly. The detail version also
-  // includes the reason for the value, such as a targeting rule or the default rule.
-  protected readonly detail = this.ld.boolVariationDetail(flagKey, false);
-  protected readonly flagValue = computed(() => this.detail().value);
-  protected readonly reason = computed(() => this.detail().reason?.kind ?? 'unknown');
+  protected readonly status = launchDarklyStatus;
+  // A signal that updates whenever the flag changes in LaunchDarkly. This is the thin version:
+  // flag-signal.ts on top of ld-client.ts.
+  protected readonly flagValue = flagSignal(flagKey, false);
   protected readonly background = computed(() => (this.flagValue() ? '#00844B' : '#373841'));
+
+  // Optional: LaunchDarklyService reuses the same client and adds evaluation details and the
+  // template directives. Remove this and the directives if you don't need them.
+  private readonly ld = inject(LaunchDarklyService);
+  private readonly detail = this.ld.boolVariationDetail(flagKey, false);
+  protected readonly reason = computed(() => this.detail().reason?.kind ?? 'unknown');
 }

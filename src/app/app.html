@@ -2,6 +2,9 @@
   @case ('complete') {
     <p>SDK successfully initialized!</p>
   }
+  @case ('timeout') {
+    <p>LaunchDarkly didn't respond within 500ms. Showing fallback values until it connects.</p>
+  }
   @case ('failed') {
     <p>
       SDK failed to initialize. Please check your internet connection and SDK credential for any
@@ -13,10 +16,10 @@
   }
 }
 <p>The {{ flagKey }} feature flag evaluates to {{ flagValue() }}.</p>
-<p class="detail">Reason: {{ reason() }}</p>
 
 <section>
-  <h2>Directive examples</h2>
+  <h2>Optional: LaunchDarklyService add-ons</h2>
+  <p class="detail">Reason: {{ reason() }}</p>
   <p *ldIf="flagKey; else flagOff">*ldIf: the flag is on.</p>
   <ng-template #flagOff><p>*ldIf: the flag is off.</p></ng-template>
   <p [ldClassIf]="flagKey" ldClassIfClass="pill on" ldClassIfElseClass="pill off">[ldClassIf]</p>

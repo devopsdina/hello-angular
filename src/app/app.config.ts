@@ -1,12 +1,13 @@
 import { ApplicationConfig, provideBrowserGlobalErrorListeners } from '@angular/core';
 
 import { clientSideID } from '../environments/environment';
-import { provideLaunchDarkly } from './launchdarkly/launchdarkly.service';
+import { provideLaunchDarklyClient } from './launchdarkly/flag-signal';
 
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
-    provideLaunchDarkly({
+    // Creates the one client for the page and waits at most 500ms for flags before the first render.
+    provideLaunchDarklyClient({
       clientSideID,
       // Set up the evaluation context. This context should appear on your LaunchDarkly
       // contexts dashboard soon after you run the demo.

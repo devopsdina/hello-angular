@@ -2,6 +2,9 @@ import { Provider } from '@angular/core';
 import type { LDClient, LDContext, LDFlagSet } from '@launchdarkly/js-client-sdk';
 
 import { LAUNCHDARKLY_CLIENT } from '../launchdarkly.service';
+import { initLaunchDarkly } from '../ld-client';
+
+type Listener = (context: LDContext, keys?: string[]) => void;
 
 /**
  * An in-memory stand-in for the LaunchDarkly client, so component tests never call LaunchDarkly.
@@ -11,16 +14,21 @@ export class MockLaunchDarklyClient {
   readonly trackedEvents: { key: string; data?: unknown; metricValue?: number }[] = [];
   private flags: LDFlagSet;
   private context: LDContext = { kind: 'user', key: 'test-user' };
-  private changeListeners: ((context: LDContext, keys: string[]) => void)[] = [];
+  private listeners = new Map<string, Listener[]>();
 
   constructor(flags: LDFlagSet = {}) {
     this.flags = { ...flags };
   }
 
-  /** Updates flag values and fires `change` events, as if they had changed in LaunchDarkly. */
+  /**
+   * Updates flag values and fires `change` and `change:<flag-key>` events, as if they had changed
+   * in LaunchDarkly.
+   */
   setFlags(flags: LDFlagSet): void {
     this.flags = { ...this.flags, ...flags };
-    this.changeListeners.forEach((listener) => listener(this.context, Object.keys(flags)));
+    const keys = Object.keys(flags);
+    this.emit('change', keys);
+    keys.forEach((key) => this.emit(`change:${key}`));
   }
 
   start = async () => ({ status: 'complete' as const });
@@ -34,10 +42,19 @@ export class MockLaunchDarklyClient {
   };
   close = async () => {};
 
-  on = (event: string, listener: (context: LDContext, keys: string[]) => void) => {
-    if (event === 'change') this.changeListeners.push(listener);
+  on = (event: string, listener: Listener) => {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
   };
-  off = () => {};
+  off = (event: string, listener: Listener) => {
+    this.listeners.set(
+      event,
+      (this.listeners.get(event) ?? []).filter((l) => l !== listener),
+    );
+  };
+
+  private emit(event: string, keys?: string[]): void {
+    (this.listeners.get(event) ?? []).forEach((listener) => listener(this.context, keys));
+  }
 
   variation = (key: string, fallback?: unknown) => (key in this.flags ? this.flags[key] : fallback);
   boolVariation = (key: string, fallback: boolean) => this.typed(key, fallback, 'boolean');
@@ -81,4 +98,16 @@ export class MockLaunchDarklyClient {
 /** Provides a mock client in place of the real one. Use it in `TestBed.configureTestingModule`. */
 export function provideMockLaunchDarkly(client: MockLaunchDarklyClient): Provider {
   return { provide: LAUNCHDARKLY_CLIENT, useValue: client as unknown as LDClient };
+}
+
+/**
+ * Makes a mock the page's client in ld-client.ts, for components that use `flagSignal()`. The
+ * service reuses it too. Call `closeLaunchDarkly()` after each test.
+ */
+export function useMockLaunchDarkly(client: MockLaunchDarklyClient): void {
+  initLaunchDarkly({
+    clientSideID: 'mock-client-side-id',
+    context: { kind: 'user', key: 'test-user' },
+    createClient: () => client as unknown as LDClient,
+  });
 }
