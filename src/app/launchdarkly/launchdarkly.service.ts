@@ -43,12 +43,42 @@ export interface LaunchDarklyConfig {
   options?: LDOptions;
   /**
    * How long app startup waits for flags, in seconds. If the SDK is not ready in time, the app
-   * renders with fallback values and updates once flags arrive. Defaults to 5.
+   * renders with fallback values and updates once flags arrive. Defaults to 0.5 (500ms); client-side
+   * apps should keep it between 0.1 and 0.5.
    */
   timeout?: number;
+  /**
+   * How long `identify()` waits for the new context's flags, in seconds. If the SDK is not done in
+   * time, the app keeps the current flag values and updates once the new ones arrive. Defaults to
+   * 0.5 (500ms).
+   */
+  identifyTimeout?: number;
 }
 
+/** The SDK's own default is 5 seconds, too long to hold a page. See the PS preflight checklist. */
+export const DEFAULT_TIMEOUT_SECONDS = 0.5;
+
 export const LAUNCHDARKLY_CONFIG = new InjectionToken<LaunchDarklyConfig>('LAUNCHDARKLY_CONFIG');
+
+// One client per page. Angular's root injector already gives one per app; this also covers a
+// second app bootstrapped on the same page, such as a micro-frontend.
+let pageClient: LDClient | undefined;
+
+/**
+ * Creates the page's LaunchDarkly client, or returns the existing one with a warning. Runs in an
+ * injection context; `LAUNCHDARKLY_CLIENT` uses it as its factory.
+ */
+export function createPageClient(): LDClient {
+  if (pageClient) {
+    console.warn(
+      '[LaunchDarkly] A LaunchDarkly client already exists on this page. Reusing it; the SDK is not re-initialized.',
+    );
+    return pageClient;
+  }
+  const { clientSideID, context, options } = inject(LAUNCHDARKLY_CONFIG);
+  pageClient = createClient(clientSideID, context, { streaming: true, ...options });
+  return pageClient;
+}
 
 /**
  * The LaunchDarkly client instance. Override this token in tests to supply a mock client
@@ -56,10 +86,7 @@ export const LAUNCHDARKLY_CONFIG = new InjectionToken<LaunchDarklyConfig>('LAUNC
  */
 export const LAUNCHDARKLY_CLIENT = new InjectionToken<LDClient>('LAUNCHDARKLY_CLIENT', {
   providedIn: 'root',
-  factory: () => {
-    const { clientSideID, context, options } = inject(LAUNCHDARKLY_CONFIG);
-    return createClient(clientSideID, context, { streaming: true, ...options });
-  },
+  factory: createPageClient,
 });
 
 export type LaunchDarklyStatus = 'initializing' | 'complete' | 'timeout' | 'failed';
@@ -107,6 +134,7 @@ export class LaunchDarklyService implements OnDestroy {
     this.config?.context,
   );
   private readonly missingFlagWarnings = new Set<string>();
+  private startPromise?: Promise<LaunchDarklyStatus>;
 
   /** The SDK's initialization status. */
   readonly status$: Observable<LaunchDarklyStatus> = this.statusSubject$.asObservable();
@@ -136,9 +164,23 @@ export class LaunchDarklyService implements OnDestroy {
     });
   }
 
-  /** Starts the SDK and waits for flags. Resolves with the result status and never rejects. */
-  async start(): Promise<LaunchDarklyStatus> {
-    const timeout = this.config?.timeout ?? 5;
+  /**
+   * Starts the SDK and waits for flags, at most `timeout` seconds. Resolves with the result status
+   * and never rejects. Calling it again logs a warning and returns the first call's result.
+   */
+  start(): Promise<LaunchDarklyStatus> {
+    if (this.startPromise) {
+      console.warn(
+        '[LaunchDarkly] start() was called again. Reusing the running client; the SDK is not re-initialized.',
+      );
+      return this.startPromise;
+    }
+    this.startPromise = this.startOnce();
+    return this.startPromise;
+  }
+
+  private async startOnce(): Promise<LaunchDarklyStatus> {
+    const timeout = this.config?.timeout ?? DEFAULT_TIMEOUT_SECONDS;
     const result = await this.client.start({ timeout });
     this.setStatus(result.status);
     if (result.status === 'timeout') {
@@ -276,9 +318,13 @@ export class LaunchDarklyService implements OnDestroy {
 
   // --- Context and events ----------------------------------------------------------------------
 
-  /** Switches to a new evaluation context, for example after login. Flags re-evaluate and update. */
+  /**
+   * Switches to a new evaluation context, for example after login. Waits at most `identifyTimeout`
+   * seconds; on timeout the SDK keeps going in the background and flags update when it finishes.
+   */
   async identify(context: LDContext): Promise<LDIdentifyResult> {
-    const result = await this.client.identify(context);
+    const timeout = this.config?.identifyTimeout ?? DEFAULT_TIMEOUT_SECONDS;
+    const result = await this.client.identify(context, { timeout });
     if (result.status === 'completed') {
       this.zone.run(() => this.contextSubject$.next(context));
     } else {
@@ -305,6 +351,7 @@ export class LaunchDarklyService implements OnDestroy {
   ngOnDestroy(): void {
     // Flushes pending analytics events and closes the streaming connection.
     this.client.close();
+    if (pageClient === this.client) pageClient = undefined;
   }
 
   private setStatus(status: LaunchDarklyStatus): void {

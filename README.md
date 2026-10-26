@@ -26,7 +26,7 @@ npm start
 
 You should receive the message "The <flagKey> feature flag evaluates to <flagValue>." The application will run continuously and react to the flag changes in LaunchDarkly. Below it, the page shows the evaluation reason and a few of the directives using the same flag.
 
-To run the unit tests, which use a mock client and never call LaunchDarkly:
+To run the unit tests, which never call LaunchDarkly. Most use a mock client; `launchdarkly.sdk.spec.ts` runs the real SDK against a local server standing in for LaunchDarkly, to measure the startup and identify timeouts:
 
 ```bash
 npm test
@@ -86,7 +86,7 @@ Every flag method has a signal version and an observable version ending in `$`. 
 | `waitUntilReady$(timeoutMs)` | Emits `false` if flags haven't loaded by the timeout, then `true` once they do. It never errors, so it's safe in route guards and resolvers |
 | `context` / `context$` | The current evaluation context |
 | `flagChanges$` | The keys of flags that just changed |
-| `identify(context)` | Switches context, for example after login. Flags re-evaluate and update |
+| `identify(context)` | Switches context, for example after login. Waits up to `identifyTimeout` (default 0.5 seconds); flags re-evaluate and update |
 | `track(key, data?, metricValue?)` | Sends a custom event for metrics and experiments |
 | `flush()` | Sends pending analytics events now |
 | `ldClient` | The underlying SDK client, for anything else |
@@ -144,7 +144,9 @@ These are the details the React SDK takes care of automatically and that you nee
 
 - **Live updates.** The service listens for the SDK's `change` event, so flag values update without a page reload.
 - **No extra re-renders.** A signal or observable only emits when *that* flag's value actually changes.
-- **No fallback flash.** App startup waits for flags (up to `timeout`, default 5 seconds) before the first render. If LaunchDarkly is slow or unreachable, the app still starts with fallback values and updates once flags arrive.
+- **One client per page.** The client is created once. A second `start()`, or a second Angular app on the same page, logs a warning and reuses the existing client instead of initializing another.
+- **No fallback flash, no long wait.** App startup waits for flags (up to `timeout`, default 0.5 seconds) before the first render. If LaunchDarkly is slow or unreachable, the app still starts with fallback values and updates once flags arrive. The SDK's own default is 5 seconds, so the service always passes an explicit timeout, following the [PS preflight checklist](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#application-does-not-block-indefinitely-for-initialization).
+- **identify() doesn't block.** It waits up to `identifyTimeout` (default 0.5 seconds). On timeout the app keeps its current flags, and they update when the SDK finishes.
 - **Change detection.** SDK callbacks re-enter Angular's zone, so this works in both zone-based and zoneless apps.
 - **Typed evaluations.** `boolVariation` and the other typed methods return your fallback when a flag's value is the wrong type.
 - **Cleanup.** Signal subscriptions end when their component is destroyed, and the SDK client closes (flushing pending events) when the app shuts down.
