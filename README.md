@@ -137,48 +137,154 @@ Evaluation reasons are only included when you set `withReasons: true` in `option
 
 #### Directives
 
-The directives are optional. They let you use flags directly in templates. Import them all with `LD_DIRECTIVES`, or import only the ones you need:
+The directives let you use flags directly in templates, without adding a signal to the component. They're optional: copy [`directives/`](src/app/launchdarkly/directives) only if you want them. Each one is a standalone directive. Import them all with `LD_DIRECTIVES`, or import only the ones you need:
 
 ```ts
-@Component({ imports: [LD_DIRECTIVES], ... })
+@Component({ imports: [LD_DIRECTIVES], ... })        // all of them
+@Component({ imports: [LdIfDirective, LdTrackDirective], ... }) // or just these
 ```
 
-| Directive | What it does |
+They use `LaunchDarklyService`, so the app must call `provideLaunchDarkly()`.
+
+| Directive | Use it to |
 | --- | --- |
-| `*ldIf` | Renders content when a flag is on, or equals `value`. Supports `else`. |
-| `*ldFlag` | Renders content with the flag's value available as a template variable. |
-| `[ldClassIf]` | Adds CSS classes when a flag is on, and optional other classes when it's off. |
-| `[ldStyleIf]` | Sets inline styles when a flag is on. Keys can include a unit, like `'fontSize.px'`. |
-| `[ldSwitch]`, `*ldSwitchCase`, `*ldSwitchDefault` | Shows the case that matches a multivariate flag's value. |
-| `[ldTrack]` | Sends a custom event on click, or on another DOM event with `ldTrackEvent`. |
+| [`*ldIf`](#ldif) | Show or hide content, like `*ngIf` for a flag |
+| [`*ldFlag`](#ldflag) | Show content with the flag's value available in the template |
+| [`[ldClassIf]`](#ldclassif) | Add or swap CSS classes |
+| [`[ldStyleIf]`](#ldstyleif) | Set inline styles |
+| [`[ldSwitch]`, `*ldSwitchCase`, `*ldSwitchDefault`](#ldswitch) | Show one of several templates for a multivariate flag, like `ngSwitch` |
+| [`[ldTrack]`](#ldtrack) | Send a custom event for metrics, experiments and guarded rollouts |
+
+##### How the directives decide whether a flag matches
+
+Every directive except `[ldTrack]` follows the same rules:
+
+- **No `value` set:** the flag matches when its value is truthy. A boolean flag matches when it's `true`. A string flag matches when it's non-empty, and a number flag when it's non-zero.
+- **`value` set:** the flag matches only when it equals `value`. JSON values are compared by their JSON form, so `{ a: 1 }` equals `{ a: 1 }` (key order counts).
+- **Flag not loaded or not found:** the directive uses its `fallback`. That happens when LaunchDarkly doesn't answer within the 500ms startup timeout, or when a flag isn't available to client-side SDKs. A returning visitor may see flag values the SDK cached on an earlier visit instead.
+- **Live updates:** when the flag changes in LaunchDarkly, the directive updates. It only touches the DOM when the result changes, and it stops listening when its element is destroyed.
+
+The directives read flags untyped. Unlike `boolVariation()`, they don't swap in the fallback when a flag serves an unexpected type.
+
+##### `*ldIf`
+
+Renders its content when the flag matches, and the `else` template, if any, when it doesn't.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `ldIf` (the flag key) | required | The flag to watch |
+| `value` | none | Match only this value |
+| `else` | none | Template to show when the flag doesn't match |
+| `fallback` | `false` | Value to use when the flag can't be evaluated, so content is hidden by default |
 
 ```html
-<!-- Show or hide content -->
 <new-checkout *ldIf="'new-checkout'; else oldCheckout" />
 <ng-template #oldCheckout><old-checkout /></ng-template>
 
-<!-- Match a specific value -->
 <p *ldIf="'theme'; value: 'dark'">Dark mode is on</p>
+```
 
-<!-- Use the flag's value in the template -->
+##### `*ldFlag`
+
+Renders its content with the flag's value as a template variable. Use it when the template needs the value itself, such as a string or a number from a flag.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `ldFlag` (the flag key) | required | The flag to watch |
+| `value` | none | Show the content only when the flag equals this value. Without it, the content always shows |
+| `else` | none | Template to show when the flag doesn't equal `value`. It gets the same variables |
+| `fallback` | `undefined` | Value to use when the flag can't be evaluated |
+
+The template gets `$implicit` (via `let x`) and `flagValue`, both the flag's value, plus `isMatch`.
+
+```html
 <p *ldFlag="'banner-text'; fallback: 'Welcome'; let text">{{ text }}</p>
 
-<!-- Classes and styles -->
+<p *ldFlag="'plan'; value: 'pro'; else basic; let plan">You're on {{ plan }}</p>
+<ng-template #basic let-plan>Upgrade from {{ plan }}</ng-template>
+```
+
+##### `[ldClassIf]`
+
+Adds classes when the flag matches, and optional other classes when it doesn't. When the result changes, it removes the classes it added before. Classes can be a space-separated string or an array.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `ldClassIf` | required | The flag key, or a config object with all the options (below) |
+| `ldClassIfClass` | none | Classes to add when the flag matches |
+| `ldClassIfElseClass` | none | Classes to add when it doesn't |
+| `ldClassIfValue` | none | Match only this value |
+| `ldClassIfFallback` | `undefined` | Value to use when the flag can't be evaluated, so the else classes apply by default |
+
+```html
 <button [ldClassIf]="'new-styles'" ldClassIfClass="btn-new" ldClassIfElseClass="btn-old">Buy</button>
+
+<!-- The same options as one object -->
+<div [ldClassIf]="{ flag: 'theme', value: 'dark', class: 'dark', elseClass: 'light' }"></div>
+```
+
+##### `[ldStyleIf]`
+
+Sets inline styles when the flag matches, and optional other styles when it doesn't. Style keys can be camelCase or kebab-case, and can carry a unit: `{ 'fontSize.px': 48 }` sets `font-size: 48px`. When the result changes, it removes the styles it set before.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `ldStyleIf` | required | The flag key, or a config object with all the options |
+| `ldStyleIfStyle` | none | Styles to set when the flag matches |
+| `ldStyleIfElseStyle` | none | Styles to set when it doesn't |
+| `ldStyleIfValue` | none | Match only this value |
+| `ldStyleIfFallback` | `undefined` | Value to use when the flag can't be evaluated |
+
+```html
 <h1 [ldStyleIf]="'big-title'" [ldStyleIfStyle]="{ 'fontSize.px': 48 }">Hello</h1>
 
-<!-- Multivariate flags -->
+<div [ldStyleIf]="{ flag: 'theme', value: 'dark', style: { background: '#000' }, elseStyle: { background: '#fff' } }"></div>
+```
+
+##### `[ldSwitch]`
+
+Shows the `*ldSwitchCase` whose value equals the flag's value, or `*ldSwitchDefault` when none does. Use it for multivariate flags with more than two outcomes. The default case waits for the flag's first value, so it doesn't flash before a real case appears.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `ldSwitch` (the flag key) | required | The flag to watch |
+| `ldSwitchFallback` | `undefined` | Value to use when the flag can't be evaluated, so the default case shows |
+| `*ldSwitchCase` | required | The value this case matches |
+
+```html
 <div [ldSwitch]="'checkout-layout'">
   <one-page *ldSwitchCase="'one-page'" />
   <multi-step *ldSwitchCase="'multi-step'" />
   <classic *ldSwitchDefault />
 </div>
-
-<!-- Custom events -->
-<button ldTrack="purchase" [ldTrackData]="{ plan: 'pro' }" [ldTrackValue]="49">Buy</button>
 ```
 
-Each directive only updates the DOM when its flag's value changes, and cleans up when it's destroyed. The selectors and inputs match the [unofficial Angular SDK](https://github.com/launchdarkly-labs/launchdarkly-angular-sdk-unofficial), so most templates written for it carry over. One difference: `ldTrack` sends your `ldTrackData` as is, without adding details about the element.
+##### `[ldTrack]`
+
+Sends a LaunchDarkly custom event when the element is clicked, or when another DOM event fires. The event key must match the event key of a metric in LaunchDarkly. The metric then feeds experiments and guarded rollouts.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `ldTrack` (the event key) | required | The event to send. If it's empty, nothing is sent and a warning is logged |
+| `ldTrackData` | none | Extra data sent with the event, as is |
+| `ldTrackValue` | none | A number for numeric metrics, such as revenue or duration |
+| `ldTrackEvent` | `click` | The DOM event that sends it, such as `focus` or `submit` |
+
+```html
+<button ldTrack="checkout-clicked">Checkout</button>
+<button ldTrack="purchase" [ldTrackData]="{ plan: 'pro' }" [ldTrackValue]="49">Buy</button>
+<input ldTrack="search-focused" ldTrackEvent="focus" />
+```
+
+Events are batched and sent in the background. Call `flush()` on the service to send them right away, for example before a full-page navigation.
+
+##### Directives or signals?
+
+Use a directive when the flag only changes what the template shows. Use a signal (`this.ld.boolVariation(...)`) when the component's code needs the value: in a `computed`, in an event handler, or to pass to a child component. Both read the same client and update the same way.
+
+##### Coming from the unofficial Angular SDK
+
+The selectors and inputs match the [unofficial Angular SDK](https://github.com/launchdarkly-labs/launchdarkly-angular-sdk-unofficial), so most templates written for it carry over. One difference: `ldTrack` sends your `ldTrackData` as is, without adding details about the element.
 
 #### Troubleshooting
 
