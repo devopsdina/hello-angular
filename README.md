@@ -2,9 +2,51 @@
 
 We've built a simple Angular application that demonstrates how to use LaunchDarkly's [JavaScript client-side SDK](https://launchdarkly.com/docs/sdk/client-side/javascript) (`@launchdarkly/js-client-sdk` v4) in Angular.
 
-LaunchDarkly doesn't ship a separate Angular SDK because the JavaScript SDK works in Angular directly. This app shows the recommended pattern: a small Angular service around the SDK that exposes flags as **signals** and **RxJS observables**. Copy [`src/app/launchdarkly/`](src/app/launchdarkly) into your own app and you're set up.
+LaunchDarkly doesn't ship an Angular SDK. Angular apps use the JavaScript SDK, which knows nothing about Angular: it doesn't know when your app starts, its callbacks don't trigger change detection, and reading a flag gives you the value at that moment, not one that updates. This app wraps the SDK in a small Angular service, `LaunchDarklyService`. The service connects the SDK to Angular's dependency injection, app startup and change detection, and exposes flags as **signals** and **RxJS observables**. Copy [`src/app/launchdarkly/`](src/app/launchdarkly) into your own app and you're set up.
 
 This demo requires Node.js v20.19 or later and uses Angular 21.
+
+#### Why use a service instead of calling the SDK directly
+
+You can call the JavaScript SDK straight from your components, and for one flag on one page that works. As an app grows, each component ends up repeating the same Angular plumbing, and small mistakes in it cause real problems: duplicate connections, views that don't update, leaked listeners, or a page that waits 5 seconds on startup. The service does that plumbing once.
+
+| | Calling the SDK directly | With `LaunchDarklyService` |
+| --- | --- | --- |
+| **Creating the client** | Each `createClient()` call opens its own connection to LaunchDarkly and sends its own events. To share one client, you manage a module-level variable yourself. | One client per page, provided through dependency injection. A second `start()`, or a second Angular app on the same page, logs a warning and reuses the existing client. |
+| **App startup** | You decide where to wait for `start()`. Wait in a component and users see fallback values flash, then change. Leave out the timeout and the SDK waits up to 5 seconds. | `provideLaunchDarkly()` holds the first render until flags load, for at most 500ms (`timeout`). If LaunchDarkly is slow or unreachable, the app renders with fallback values and updates when flags arrive. |
+| **Reading flags** | `variation()` returns the value at that moment. To react to changes, each component subscribes to `change:<flag-key>` and must unsubscribe when destroyed, or the listener leaks. | `boolVariation()` and the other methods return a signal (or an observable, with `$`) that updates when the flag changes. The subscription ends when the component is destroyed. |
+| **Change detection** | SDK callbacks run outside Angular. In zone-based apps, views don't refresh unless you wrap updates in `NgZone.run()`. In zoneless apps (the Angular 21 default), only a signal change or an explicit trigger refreshes the view. | The service re-enters Angular's zone and feeds signals, so views update in both zone-based and zoneless apps. |
+| **Re-renders** | The `change` event fires for any flag. Your handler runs even when the flag you care about didn't change. | A signal or observable emits only when *that* flag's value changes. |
+| **Switching users** | `identify()` with no timeout waits up to 5 seconds, the SDK default. | `identify()` waits at most 500ms (`identifyTimeout`). On timeout the app keeps its current flags, which update when the SDK finishes. The `context` signal tracks the current context. |
+| **Missing flags** | A flag that isn't marked available to client-side SDKs silently returns its fallback value. | Logs a warning naming the flag and the setting to change. |
+| **Shutdown** | You call `close()` yourself, or pending analytics events can be lost. | The client closes, flushing pending events, when the app is destroyed. |
+| **Testing** | Components that import the SDK need module-level mocking. | Components inject the service. Tests swap in `MockLaunchDarklyClient` through the `LAUNCHDARKLY_CLIENT` token, so they never call LaunchDarkly. |
+| **Templates** | No template support. | Optional directives (`*ldIf`, `[ldClassIf]`, `[ldTrack]` and others) use flags directly in templates. |
+
+The timeouts and the singleton follow the PS preflight checklist: [explicit init timeout](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#application-does-not-block-indefinitely-for-initialization), [singleton](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#sdk-is-initialized-once-as-a-singleton-early-in-the-applications-lifecycle), and [non-blocking identify](https://launchdarkly-labs.github.io/ps-flag-book/cookbook/identify-timeout/index.html#javascript-client-side).
+
+Here is the same flag read both ways:
+
+```ts
+// Calling the SDK directly: a one-time value, plus a listener you must add, re-enter the zone for, and remove.
+// `client` is a shared instance you created with createClient() and started yourself.
+export class BannerComponent implements OnDestroy {
+  private readonly zone = inject(NgZone);
+  showBanner = client.boolVariation('show-banner', false);
+  private readonly onChange = () => this.zone.run(() => {
+    this.showBanner = client.boolVariation('show-banner', false);
+  });
+  constructor() { client.on('change:show-banner', this.onChange); }
+  ngOnDestroy() { client.off('change:show-banner', this.onChange); }
+}
+
+// With the service: a signal that stays current and cleans up after itself.
+export class BannerComponent {
+  readonly showBanner = inject(LaunchDarklyService).boolVariation('show-banner', false);
+}
+```
+
+In a zoneless app, the direct version also needs `ChangeDetectorRef.markForCheck()` or a signal for the view to refresh.
 
 #### Build instructions
 
@@ -137,19 +179,6 @@ The directives are optional. They let you use flags directly in templates. Impor
 ```
 
 Each directive only updates the DOM when its flag's value changes, and cleans up when it's destroyed. The selectors and inputs match the [unofficial Angular SDK](https://github.com/launchdarkly-labs/launchdarkly-angular-sdk-unofficial), so most templates written for it carry over. One difference: `ldTrack` sends your `ldTrackData` as is, without adding details about the element.
-
-#### Things the service handles for you
-
-These are the details the React SDK takes care of automatically and that you need to handle yourself in Angular:
-
-- **Live updates.** The service listens for the SDK's `change` event, so flag values update without a page reload.
-- **No extra re-renders.** A signal or observable only emits when *that* flag's value actually changes.
-- **One client per page.** The client is created once. A second `start()`, or a second Angular app on the same page, logs a warning and reuses the existing client instead of initializing another.
-- **No fallback flash, no long wait.** App startup waits for flags (up to `timeout`, default 0.5 seconds) before the first render. If LaunchDarkly is slow or unreachable, the app still starts with fallback values and updates once flags arrive. The SDK's own default is 5 seconds, so the service always passes an explicit timeout, following the [PS preflight checklist](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#application-does-not-block-indefinitely-for-initialization).
-- **identify() doesn't block.** It waits up to `identifyTimeout` (default 0.5 seconds). On timeout the app keeps its current flags, and they update when the SDK finishes.
-- **Change detection.** SDK callbacks re-enter Angular's zone, so this works in both zone-based and zoneless apps.
-- **Typed evaluations.** `boolVariation` and the other typed methods return your fallback when a flag's value is the wrong type.
-- **Cleanup.** Signal subscriptions end when their component is destroyed, and the SDK client closes (flushing pending events) when the app shuts down.
 
 #### Troubleshooting
 
