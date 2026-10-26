@@ -2,51 +2,86 @@
 
 We've built a simple Angular application that demonstrates how to use LaunchDarkly's [JavaScript client-side SDK](https://launchdarkly.com/docs/sdk/client-side/javascript) (`@launchdarkly/js-client-sdk` v4) in Angular.
 
-LaunchDarkly doesn't ship an Angular SDK. Angular apps use the JavaScript SDK, which knows nothing about Angular: it doesn't know when your app starts, its callbacks don't trigger change detection, and reading a flag gives you the value at that moment, not one that updates. This app wraps the SDK in a small Angular service, `LaunchDarklyService`. The service connects the SDK to Angular's dependency injection, app startup and change detection, and exposes flags as **signals** and **RxJS observables**. Copy [`src/app/launchdarkly/`](src/app/launchdarkly) into your own app and you're set up.
+LaunchDarkly doesn't ship an Angular SDK. Angular apps use the JavaScript SDK directly. This app shows two ways to do that:
+
+- **The thin version (start here).** Two small files: [`ld-client.ts`](src/app/launchdarkly/ld-client.ts) creates the SDK client and applies the PS preflight checklist rules, and [`flag-signal.ts`](src/app/launchdarkly/flag-signal.ts) connects it to Angular. Together they're about 200 lines, most of it comments, and `ld-client.ts` is the same module as the [hello-js](https://github.com/devopsdina/hello-js) example.
+- **`LaunchDarklyService` (optional).** A larger layer on top of the thin version. It adds observables, evaluation details, template directives and a mockable client. It reuses the thin version's client and rules, so adding it later doesn't change how the SDK starts.
 
 This demo requires Node.js v20.19 or later and uses Angular 21.
 
-#### Why use a service instead of calling the SDK directly
+#### Angular terms used in this README
 
-You can call the JavaScript SDK straight from your components, and for one flag on one page that works. As an app grows, each component ends up repeating the same Angular plumbing, and small mistakes in it cause real problems: duplicate connections, views that don't update, leaked listeners, or a page that waits 5 seconds on startup. The service does that plumbing once.
+If you're new to Angular, these are the two ideas you need.
 
-| | Calling the SDK directly | With `LaunchDarklyService` |
-| --- | --- | --- |
-| **Creating the client** | Each `createClient()` call opens its own connection to LaunchDarkly and sends its own events. To share one client, you manage a module-level variable yourself. | One client per page, provided through dependency injection. A second `start()`, or a second Angular app on the same page, logs a warning and reuses the existing client. |
-| **App startup** | You decide where to wait for `start()`. Wait in a component and users see fallback values flash, then change. Leave out the timeout and the SDK waits up to 5 seconds. | `provideLaunchDarkly()` holds the first render until flags load, for at most 500ms (`timeout`). If LaunchDarkly is slow or unreachable, the app renders with fallback values and updates when flags arrive. |
-| **Reading flags** | `variation()` returns the value at that moment. To react to changes, each component subscribes to `change:<flag-key>` and must unsubscribe when destroyed, or the listener leaks. | `boolVariation()` and the other methods return a signal (or an observable, with `$`) that updates when the flag changes. The subscription ends when the component is destroyed. |
-| **Change detection** | SDK callbacks run outside Angular. In zone-based apps, views don't refresh unless you wrap updates in `NgZone.run()`. In zoneless apps (the Angular 21 default), only a signal change or an explicit trigger refreshes the view. | The service re-enters Angular's zone and feeds signals, so views update in both zone-based and zoneless apps. |
-| **Re-renders** | The `change` event fires for any flag. Your handler runs even when the flag you care about didn't change. | A signal or observable emits only when *that* flag's value changes. |
-| **Switching users** | `identify()` with no timeout waits up to 5 seconds, the SDK default. | `identify()` waits at most 500ms (`identifyTimeout`). On timeout the app keeps its current flags, which update when the SDK finishes. The `context` signal tracks the current context. |
-| **Missing flags** | A flag that isn't marked available to client-side SDKs silently returns its fallback value. | Logs a warning naming the flag and the setting to change. |
-| **Shutdown** | You call `close()` yourself, or pending analytics events can be lost. | The client closes, flushing pending events, when the app is destroyed. |
-| **Testing** | Components that import the SDK need module-level mocking. | Components inject the service. Tests swap in `MockLaunchDarklyClient` through the `LAUNCHDARKLY_CLIENT` token, so they never call LaunchDarkly. |
-| **Templates** | No template support. | Optional directives (`*ldIf`, `[ldClassIf]`, `[ldTrack]` and others) use flags directly in templates. |
+**Signal.** A value that Angular watches. You read it by calling it like a function: `showBanner()`. When the value changes, Angular redraws the parts of the page that used it. You don't have to tell it to. `flagSignal('show-banner', false)` gives you a signal holding the flag's value. When the flag changes in LaunchDarkly, the signal changes, and so does the page.
 
-The timeouts and the singleton follow the PS preflight checklist: [explicit init timeout](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#application-does-not-block-indefinitely-for-initialization), [singleton](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#sdk-is-initialized-once-as-a-singleton-early-in-the-applications-lifecycle), and [non-blocking identify](https://launchdarkly-labs.github.io/ps-flag-book/cookbook/identify-timeout/index.html#javascript-client-side).
+```ts
+readonly showBanner = flagSignal('show-banner', false); // a signal
+```
+
+```html
+@if (showBanner()) { <app-banner /> }  <!-- redraws when the flag changes -->
+```
+
+**Observable.** A stream of values over time, from the [RxJS](https://rxjs.dev) library that Angular uses for events, HTTP requests and similar things. Instead of reading a current value, you `subscribe` and get a callback each time a new value arrives. Observables can be combined and transformed: filtered, delayed, merged with other streams. Angular apps that are built around RxJS (many older or larger ones are) often prefer flags as observables, so they fit into existing streams. Methods that return an observable end in `$` by convention, like `boolVariation$`.
+
+```ts
+ld.boolVariation$('show-banner', false).subscribe((on) => console.log('banner is', on));
+```
+
+Signals are the newer, simpler option, and the thin version uses only signals. Use the service if your app needs observables.
+
+#### Preflight checklist
+
+`ld-client.ts` applies three rules from the PS preflight checklist. They're the only code that creates, starts or identifies the client, so both the thin version and the service follow them.
+
+| Rule | How it's met |
+| --- | --- |
+| [Initialize the SDK once, as a singleton](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#sdk-is-initialized-once-as-a-singleton-early-in-the-applications-lifecycle) | `initLaunchDarkly()` creates one client for the page. Calling it again logs `initLaunchDarkly() was called again… the SDK is not re-initialized` and returns the existing client. The service reuses that client too. |
+| [Don't block indefinitely on initialization](https://launchdarkly-labs.github.io/ps-flag-book/sdk/preflight-checklist/init-and-config.html#application-does-not-block-indefinitely-for-initialization): an explicit timeout of 500ms or less | The client starts with `start({ timeout: 0.5 })`. The SDK measures timeouts in seconds and defaults to 5. `provideLaunchDarklyClient()` holds the first render for at most 500ms. If LaunchDarkly is slow or unreachable, the app renders with fallback values and updates when flags arrive. |
+| [Don't block on identify](https://launchdarkly-labs.github.io/ps-flag-book/cookbook/identify-timeout/index.html#javascript-client-side) | `identifyContext()` calls `identify(context, { timeout: 0.5 })`. On timeout the app keeps its current flags. The SDK keeps going in the background, and flags update when it finishes. |
+
+The specs check these against the real SDK, using a local server that stands in for LaunchDarkly and either answers or never does. With the timeouts or the singleton check removed, those specs fail.
+
+#### Why not just call the SDK from components?
+
+You can, and the thin version is close to that. It adds only what the SDK can't know about Angular:
+
+- **When the app starts.** Without an app initializer, components render before flags load and show fallback values that then change. `provideLaunchDarklyClient()` waits for flags, for at most 500ms, before the first render.
+- **That a value changed.** `client.variation()` returns the value at that moment. To update the page when a flag changes, a component has to listen for the SDK's `change:<flag-key>` event, update something Angular watches, and stop listening when the component is removed, or the listener leaks. `flagSignal()` does all three.
+- **One client for the whole app.** Each `createClient()` call opens its own connection to LaunchDarkly. `ld-client.ts` keeps one client and warns instead of creating a second.
 
 Here is the same flag read both ways:
 
 ```ts
-// Calling the SDK directly: a one-time value, plus a listener you must add, re-enter the zone for, and remove.
-// `client` is a shared instance you created with createClient() and started yourself.
+// Calling the SDK directly. `client` is a shared instance you created and started yourself.
 export class BannerComponent implements OnDestroy {
-  private readonly zone = inject(NgZone);
-  showBanner = client.boolVariation('show-banner', false);
-  private readonly onChange = () => this.zone.run(() => {
-    this.showBanner = client.boolVariation('show-banner', false);
-  });
-  constructor() { client.on('change:show-banner', this.onChange); }
-  ngOnDestroy() { client.off('change:show-banner', this.onChange); }
+  readonly showBanner = signal(client.boolVariation('show-banner', false));
+  private readonly update = () => this.showBanner.set(client.boolVariation('show-banner', false));
+  constructor() { client.on('change:show-banner', this.update); }
+  ngOnDestroy() { client.off('change:show-banner', this.update); }
 }
 
-// With the service: a signal that stays current and cleans up after itself.
+// With the thin version.
 export class BannerComponent {
-  readonly showBanner = inject(LaunchDarklyService).boolVariation('show-banner', false);
+  readonly showBanner = flagSignal('show-banner', false);
 }
 ```
 
-In a zoneless app, the direct version also needs `ChangeDetectorRef.markForCheck()` or a signal for the view to refresh.
+#### When to add the service
+
+Add `LaunchDarklyService` when you need one of these. Otherwise the thin version is less code to own.
+
+| You need | The service gives you |
+| --- | --- |
+| Flags as observables, for an app built around RxJS | `boolVariation$()` and the other `$` methods, plus `flagChanges$`, `status$`, `ready$` and `context$` |
+| Why a flag has its value, for debugging or display | `boolVariationDetail()` and the other `...Detail` methods, with the evaluation reason |
+| Flags directly in templates | The [directives](#directives): `*ldIf`, `*ldFlag`, `[ldClassIf]`, `[ldStyleIf]`, `[ldSwitch]` and `[ldTrack]` |
+| To wait for flags in a route guard or resolver | `waitUntilReady$(timeoutMs)` |
+| A warning when a flag isn't available to client-side SDKs | The service logs which flag, and which setting to change |
+| To swap the client for a mock through dependency injection | The `LAUNCHDARKLY_CLIENT` token (the thin version can use a mock too, see [Testing](#testing-your-components)) |
+
+This demo uses both: the main flag on the page uses the thin version, and the "Optional: LaunchDarklyService add-ons" box below it uses the service.
 
 #### Build instructions
 
@@ -66,30 +101,36 @@ npm start
 
 3. Open [http://localhost:4200](http://localhost:4200).
 
-You should receive the message "The <flagKey> feature flag evaluates to <flagValue>." The application will run continuously and react to the flag changes in LaunchDarkly. Below it, the page shows the evaluation reason and a few of the directives using the same flag.
+You should receive the message "The <flagKey> feature flag evaluates to <flagValue>." The application will run continuously and react to the flag changes in LaunchDarkly. Below it, a box shows the service add-ons: the evaluation reason and a few directives using the same flag.
 
-To run the unit tests, which never call LaunchDarkly. Most use a mock client; `launchdarkly.sdk.spec.ts` runs the real SDK against a local server standing in for LaunchDarkly, to measure the startup and identify timeouts:
+To run the tests, which never call LaunchDarkly:
 
 ```bash
 npm test
 ```
 
+Specs ending in `ld-client.spec.ts`, `flag-signal.spec.ts` and `launchdarkly.sdk.spec.ts` run the real SDK against a local server standing in for LaunchDarkly. The rest use an in-memory mock client.
+
 #### How it works
 
 | File | What it does |
 | --- | --- |
-| [`launchdarkly.service.ts`](src/app/launchdarkly/launchdarkly.service.ts) | The service, plus `provideLaunchDarkly()` to register it. This is the part to copy into your app. |
-| [`directives/`](src/app/launchdarkly/directives) | Optional template directives (`*ldIf`, `[ldTrack]`, and others). Copy them too if you want them. |
+| [`ld-client.ts`](src/app/launchdarkly/ld-client.ts) | Creates the one client for the page and applies the preflight rules. No Angular code. **Copy this.** |
+| [`flag-signal.ts`](src/app/launchdarkly/flag-signal.ts) | `provideLaunchDarklyClient()` and `flagSignal()`: the thin Angular layer. **Copy this.** |
+| [`launchdarkly.service.ts`](src/app/launchdarkly/launchdarkly.service.ts) | Optional. The service, plus `provideLaunchDarkly()` to use it on its own. |
+| [`directives/`](src/app/launchdarkly/directives) | Optional template directives. They need the service. |
 | [`testing/mock-launchdarkly-client.ts`](src/app/launchdarkly/testing/mock-launchdarkly-client.ts) | An in-memory client for unit tests. |
-| [`app.config.ts`](src/app/app.config.ts) | Registers the service with your client-side ID and evaluation context. |
+| [`app.config.ts`](src/app/app.config.ts) | Starts the client with your client-side ID and evaluation context. |
 | [`app.ts`](src/app/app.ts) | The demo component that reads the flag. |
 
-Register the service once in your app config:
+#### Thin version reference
+
+Start the client once in your app config:
 
 ```ts
 export const appConfig: ApplicationConfig = {
   providers: [
-    provideLaunchDarkly({
+    provideLaunchDarklyClient({
       clientSideID: 'myClientSideID',
       context: { kind: 'user', key: 'example-user-key' },
       options: {}, // any JavaScript SDK option, passed straight through
@@ -98,37 +139,49 @@ export const appConfig: ApplicationConfig = {
 };
 ```
 
-Then read flags in any component, as a signal:
+Then read flags in any component:
+
+```ts
+export class MyComponent {
+  readonly showBanner = flagSignal('show-banner', false); // Signal<boolean>
+  readonly theme = flagSignal('theme', 'light'); // Signal<string>
+}
+```
+
+| Function | What it does |
+| --- | --- |
+| `provideLaunchDarklyClient(config)` | Creates and starts the client during app startup, waiting at most 500ms for flags |
+| `flagSignal(key, fallback)` | The flag's value as a signal that updates when the flag changes. Call it in a field initializer or constructor; it stops listening when the component is destroyed |
+| `launchDarklyStatus` | A signal with the startup result: `'initializing'`, then `'complete'`, `'timeout'` or `'failed'`. After a timeout, it changes to `'complete'` if flags arrive within the next 5 seconds (the SDK's `waitForInitialization()` default). Flag signals update whenever flags arrive |
+| `identifyContext(context)` | Switches context, for example after login. Waits at most 500ms; flag signals update when the new context's flags arrive |
+| `getLaunchDarkly()` | The SDK client, for anything else: `track()`, `flush()`, `allFlags()` and so on |
+
+`flagSignal()` reads flags untyped. If a flag serves a different type than your fallback, you get that value, not the fallback. The service's typed methods (`boolVariation` and so on) return the fallback instead.
+
+#### Service reference
+
+To use the service without the thin provider, register it with `provideLaunchDarkly()` instead of `provideLaunchDarklyClient()`. It takes the same `clientSideID`, `context` and `options`. If the thin provider already started a client, the service reuses it and needs no configuration of its own.
 
 ```ts
 export class MyComponent {
   private readonly ld = inject(LaunchDarklyService);
-  readonly showBanner = this.ld.boolVariation('show-banner', false); // Signal<boolean>
+  readonly showBanner = this.ld.boolVariation('show-banner', false); // a signal
+  readonly theme$ = this.ld.stringVariation$('theme', 'light'); // an observable
 }
 ```
-
-or as an observable:
-
-```ts
-this.ld.stringVariation$('theme', 'light').subscribe((theme) => applyTheme(theme));
-```
-
-String, number, and JSON flags work the same way (`stringVariation`, `numberVariation`, `jsonVariation`). `variation` is untyped and returns whatever the flag serves.
-
-#### Service reference
 
 Every flag method has a signal version and an observable version ending in `$`. Call the signal versions in a field initializer or constructor.
 
 | Method | Returns |
 | --- | --- |
-| `boolVariation`, `stringVariation`, `numberVariation`, `jsonVariation`, `variation` | The flag value |
+| `boolVariation`, `stringVariation`, `numberVariation`, `jsonVariation`, `variation` | The flag value. The typed ones return your fallback if the flag serves the wrong type |
 | `boolVariationDetail`, `stringVariationDetail`, `numberVariationDetail`, `jsonVariationDetail`, `variationDetail` | The value plus the reason for it, for example a targeting rule match, the default rule, or `FLAG_NOT_FOUND` |
-| `status` / `status$` | `'initializing'`, `'complete'`, `'timeout'`, or `'failed'` |
+| `status` / `status$` | `'initializing'`, `'complete'`, `'timeout'`, or `'failed'`. If the thin provider started the client, the service picks up its result |
 | `ready` / `ready$` | `true` once flags have loaded |
 | `waitUntilReady$(timeoutMs)` | Emits `false` if flags haven't loaded by the timeout, then `true` once they do. It never errors, so it's safe in route guards and resolvers |
 | `context` / `context$` | The current evaluation context |
 | `flagChanges$` | The keys of flags that just changed |
-| `identify(context)` | Switches context, for example after login. Waits up to `identifyTimeout` (default 0.5 seconds); flags re-evaluate and update |
+| `identify(context)` | Switches context, for example after login. Waits at most 500ms; flags re-evaluate and update |
 | `track(key, data?, metricValue?)` | Sends a custom event for metrics and experiments |
 | `flush()` | Sends pending analytics events now |
 | `ldClient` | The underlying SDK client, for anything else |
@@ -144,7 +197,7 @@ The directives let you use flags directly in templates, without adding a signal 
 @Component({ imports: [LdIfDirective, LdTrackDirective], ... }) // or just these
 ```
 
-They use `LaunchDarklyService`, so the app must call `provideLaunchDarkly()`.
+They're part of the optional service. They work with either `provideLaunchDarklyClient()` or `provideLaunchDarkly()` in your app config.
 
 | Directive | Use it to |
 | --- | --- |
@@ -280,7 +333,7 @@ Events are batched and sent in the background. Call `flush()` on the service to 
 
 ##### Directives or signals?
 
-Use a directive when the flag only changes what the template shows. Use a signal (`this.ld.boolVariation(...)`) when the component's code needs the value: in a `computed`, in an event handler, or to pass to a child component. Both read the same client and update the same way.
+Use a directive when the flag only changes what the template shows. Use a signal (`flagSignal(...)` or the service's `boolVariation(...)`) when the component's code needs the value: in a `computed`, in an event handler, or to pass to a child component. They all read the same client and update the same way.
 
 ##### Coming from the unofficial Angular SDK
 
@@ -288,21 +341,32 @@ The selectors and inputs match the [unofficial Angular SDK](https://github.com/l
 
 #### Troubleshooting
 
-Open your browser's developer console. The service logs a `[LaunchDarkly]` warning when something is off.
+Open your browser's developer console. The SDK and this code log `[LaunchDarkly]` messages when something is off.
 
-- **The flag always shows `false` and doesn't change when you toggle it.** The console shows `Flag "<flagKey>" wasn't found`. Browser apps only receive flags that are marked available to client-side SDKs. In LaunchDarkly, open the flag's **Settings**, check **SDKs using Client-side ID** under **Client-side SDK availability**, save, and refresh the page. Also check that `clientSideID` belongs to the environment you're toggling the flag in.
+- **The flag always shows `false` and doesn't change when you toggle it.** The console shows `Unknown feature flag "<flagKey>"` (from the SDK) or `Flag "<flagKey>" wasn't found` (from the service). Browser apps only receive flags that are marked available to client-side SDKs. In LaunchDarkly, open the flag's **Settings**, check **SDKs using Client-side ID** under **Client-side SDK availability**, save, and refresh the page. Also check that `clientSideID` belongs to the environment you're toggling the flag in.
 - **"SDK failed to initialize."** The client-side ID is wrong, or the browser can't reach LaunchDarkly (an ad blocker, proxy, or firewall can block it). Use the client-side ID, not the SDK key or mobile key.
-- **"Initializing…" stays on screen.** Flags didn't load within the startup timeout. The SDK keeps retrying, and the page updates once it connects.
+- **"LaunchDarkly didn't respond within 500ms."** Flags didn't load within the startup timeout, so the page shows fallback values. The SDK keeps retrying, and the page updates once it connects.
 
 #### Testing your components
 
-Swap the real client for the mock in `TestBed`, then change flags during the test:
+Use the in-memory mock client so component tests never call LaunchDarkly, then change flags during the test.
+
+For components that use `flagSignal()`, make the mock the page's client. The service picks it up too:
 
 ```ts
 const client = new MockLaunchDarklyClient({ 'show-banner': false });
-TestBed.configureTestingModule({ imports: [MyComponent], providers: [provideMockLaunchDarkly(client)] });
+useMockLaunchDarkly(client);
+TestBed.configureTestingModule({ imports: [MyComponent] });
 
-client.setFlags({ 'show-banner': true }); // fires a change event, just like LaunchDarkly would
+client.setFlags({ 'show-banner': true }); // fires change events, just like LaunchDarkly would
+
+afterEach(() => closeLaunchDarkly());
 ```
 
-See [`app.spec.ts`](src/app/app.spec.ts), [`launchdarkly.service.spec.ts`](src/app/launchdarkly/launchdarkly.service.spec.ts), and [`directives.spec.ts`](src/app/launchdarkly/directives/directives.spec.ts) for full examples.
+For code that only uses the service, you can provide the mock through dependency injection instead:
+
+```ts
+TestBed.configureTestingModule({ imports: [MyComponent], providers: [provideMockLaunchDarkly(client)] });
+```
+
+See [`app.spec.ts`](src/app/app.spec.ts), [`launchdarkly.service.spec.ts`](src/app/launchdarkly/launchdarkly.service.spec.ts), and [`directives.spec.ts`](src/app/launchdarkly/directives/directives.spec.ts) for full examples. [`ld-client.spec.ts`](src/app/launchdarkly/ld-client.spec.ts) and [`flag-signal.spec.ts`](src/app/launchdarkly/flag-signal.spec.ts) show how to test against the real SDK with a local stand-in for LaunchDarkly.
